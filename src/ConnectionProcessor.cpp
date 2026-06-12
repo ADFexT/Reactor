@@ -5,8 +5,9 @@
 #include <cstring>
 #include <iostream>
 #include <unordered_map>
+#include <arpa/inet.h>
 
-ConnectionProcessor::ConnectionProcessor(ThreadSafeQueue<int>& queue,int threadNum):
+ConnectionProcessor::ConnectionProcessor(ThreadSafeQueue<clientInfo>& queue,int threadNum):
     queue_(queue),threadNum_(threadNum),running_(false){
         if (threadNum_ <= 0) threadNum_ = 1;
         workerepollfds.resize(threadNum_,-1);
@@ -31,14 +32,12 @@ void ConnectionProcessor::stop(){
 
     for (size_t i = 0; i < threadNum_; i++)
     {
-        queue_.push(-1);
+        queue_.push(clientInfo());
     }
     
     for (auto& t : threads_)
     {
         if (t.joinable())   t.join();
-            
-        
     }
     
 
@@ -104,21 +103,24 @@ void ConnectionProcessor::handleNewConnections(int epollfd){
     uint64_t dummy;
     read(queue_.getEventFd(),&dummy,sizeof(dummy));
 
-    int fd;
-    while (queue_.trypop(fd))
+    clientInfo client;
+    while (queue_.trypop(client))
     {
-        if (fd == -1) return;
+        if (client.fd == -1) return;
         
         epoll_event ev{};
-        ev.data.fd = fd;
+        ev.data.fd = client.fd;
         ev.events = EPOLLIN | EPOLLRDHUP | EPOLLET;
 
-        if (epoll_ctl(epollfd,EPOLL_CTL_ADD,fd,&ev) == -1)
+        if (epoll_ctl(epollfd,EPOLL_CTL_ADD,client.fd,&ev) == -1)
         {
             fprintf(stderr,"handleNewConnections failed to add new fd to epoll"); 
-            close(fd);
+            close(client.fd);
+            client.fd = -1;
             continue;
         }
+
+        fprintf(stdout,"%s:%d connect to server\n",client.getIP(),client.getPort());
         
         int threadid = -1;
         for (size_t i = 0; i < threadNum_; i++)
@@ -132,7 +134,8 @@ void ConnectionProcessor::handleNewConnections(int epollfd){
 
         if (threadid != -1)
         {
-            connections_[threadid][fd] = std::make_unique<connection>(fd);
+            connections_[threadid][client.fd] = std::make_unique<connection>(client.fd,client.getIP(),client.getPort());
+
         }
     }
 }
@@ -169,6 +172,7 @@ void ConnectionProcessor::handleClientEvent(int epollfd,int fd,uint32_t events){
             if (n > 0)
             {
                 conn->readbuffer.append(buf,n);
+                fprintf(stdout,"%s:%d:\n%s\n",conn->ip,conn->port,conn->readbuffer);
             }else if (n == 0)
             {
                 close(fd);
@@ -188,8 +192,7 @@ void ConnectionProcessor::handleClientEvent(int epollfd,int fd,uint32_t events){
             {
                 conn->writebuffer  += conn->readbuffer;
                 conn->readbuffer.clear();
-
-
+                
                 while (!conn->writebuffer.empty())
                 {   
                     size_t n = write(fd,conn->writebuffer.data(),conn->writebuffer.length());

@@ -17,14 +17,16 @@ private:
     struct connection
     {
         int fd;
+        int port;
+        std::string ip;
         std::string readbuffer;
         std::string writebuffer;
         bool writePending = false;
 
-        connection(int _fd):fd(_fd) {}
+        connection(int _fd,std::string _ip,int _port):fd(_fd),ip(_ip),port(_port) {}
     };
 
-    ThreadSafeQueue<int>& queue_;
+    ThreadSafeQueue<clientInfo>& queue_;
     int threadNum_;
     std::vector<std::thread> threads_;
     std::atomic<bool> running_;
@@ -32,7 +34,7 @@ private:
     std::vector<int> workerepollfds;
     std::vector<std::unordered_map<int,std::unique_ptr<connection>>> connections_;
 public:
-    ConnectionProcessor(ThreadSafeQueue<int>& queue,int threadNum);
+    ConnectionProcessor(ThreadSafeQueue<clientInfo>& queue,int threadNum);
     ~ConnectionProcessor();
 
     void start();

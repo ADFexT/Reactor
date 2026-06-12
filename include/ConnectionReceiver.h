@@ -1,26 +1,27 @@
 #pragma once
+
 #include "ThreadSafeQueue.h"
 #include <string>
-#include <thread>
 #include <atomic>
+#include <thread>
 
-class ConnectionReceiver {
+class ConnectionReceiver{
+private:
+    void run();
+    void handleAccept();
+
+    int port_;
+    int listenfd_;
+    int epollfd_;
+    int stopfd_;
+    ThreadSafeQueue<clientInfo>& queue_;
+    std::atomic<bool> running_;
+    std::thread thread_;
+
 public:
-    ConnectionReceiver(int port,ThreadSafeQueue<std::int>& queue);
+    ConnectionReceiver(int port,ThreadSafeQueue<clientInfo>& queue);
     ~ConnectionReceiver();
 
     void start();
     void stop();
-private:
-    void run();
-    void handleaccept();
-    int port_;
-    int listen_fd_;
-    int epoll_fd_;
-    int stopEvent_fd_;
-    std::thread thread_;
-    std::atomic<bool> running_;
-    ThreadSafeQueue<std::int>& queue_;
 };
-
-

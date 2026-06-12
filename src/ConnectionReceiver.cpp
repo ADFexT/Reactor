@@ -9,7 +9,7 @@
 #include <stdexcept>
 #include <iostream>
 
-ConnectionReceiver::ConnectionReceiver(int port,ThreadSafeQueue<int>& queue):
+ConnectionReceiver::ConnectionReceiver(int port,ThreadSafeQueue<clientInfo>& queue):
     port_(port),queue_(queue),listenfd_(-1),epollfd_(-1),stopfd_(-1),running_(false){
         stopfd_ = eventfd(0,O_NONBLOCK | O_CLOEXEC);
         if (stopfd_ == -1)
@@ -113,6 +113,8 @@ void ConnectionReceiver::run(){
             {
                 uint64_t dummy;
                 read(stopfd_,&dummy,sizeof(dummy));
+                running_ = false;
+                break;
             }
         }
     }
@@ -125,7 +127,9 @@ void ConnectionReceiver::handleAccept(){
         socklen_t len = sizeof(clientaddr);
         int clientfd = accept4(listenfd_,(sockaddr*)&clientaddr,&len,SOCK_NONBLOCK | SOCK_CLOEXEC);
         if (clientfd == -1) break;
+
+        clientInfo client(clientfd,clientaddr.sin_addr.s_addr,clientaddr.sin_port);
         
-        queue_.push(clientfd);
+        queue_.push(std::move(client));
     }
 }
