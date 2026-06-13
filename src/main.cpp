@@ -1,60 +1,66 @@
-// File: main.cpp
 #include "../include/ConnectionReceiver.h"
 #include "../include/ConnectionProcessor.h"
+#include "../include/ThreadSafeQueue.h"
 #include <iostream>
 #include <signal.h>
-#include <thread>
-#include <chrono>
+#include <unistd.h>
+#include <stdlib.h>
 
-// 全局对象指针，用于信号处理
-std::unique_ptr<ConnectionReceiver> g_receiver;
-std::unique_ptr<ConnectionProcessor> g_processor;
-std::unique_ptr<ThreadSafeQueue<int>> g_queue;
+// 全局变量（用于信号处理）
+std::atomic<bool> g_running(true);
+ConnectionReceiver* g_receiver = nullptr;
+ConnectionProcessor* g_processor = nullptr;
 
-// 信号处理函数，用于优雅退出
-void signalHandler(int sig) {
-    std::cout << "\nReceived signal " << sig << ", stopping server..." << std::endl;
-    
-    if (g_receiver) g_receiver->stop();
-    if (g_processor) g_processor->stop();
-    
-    std::this_thread::sleep_for(std::chrono::seconds(1));
-    exit(0);
+// 信号处理函数（处理Ctrl+C退出）
+void handleSignal(int sig) {
+    if (sig == SIGINT) {
+        std::cout << "\nReceived SIGINT, stopping server..." << std::endl;
+        g_running = false;
+        if (g_receiver) {
+            g_receiver->stop();
+        }
+        if (g_processor) {
+            g_processor->stop();
+        }
+    }
 }
 
 int main(int argc, char* argv[]) {
-    signal(SIGINT, signalHandler);
-    signal(SIGTERM, signalHandler);
+    // 配置参数
+    const int SERVER_PORT = 8888;          // 监听端口
+    const int WORKER_THREAD_NUM = 4;       // 工作线程数
 
-    int port = 8888;
-    int threadNum = std::thread::hardware_concurrency();
-    if (threadNum == 0) threadNum = 4;
-
-    if (argc > 1) port = atoi(argv[1]);
-    if (argc > 2) threadNum = atoi(argv[2]);
-
-    std::cout << "Starting Reactor Server on port " << port 
-              << " with " << threadNum << " worker threads." << std::endl;
+    // 注册信号处理（处理Ctrl+C）
+    signal(SIGINT, handleSignal);
 
     try {
-        g_queue = std::make_unique<ThreadSafeQueue<int>>();
-        g_processor = std::make_unique<ConnectionProcessor>(*g_queue, threadNum);
-        g_receiver = std::make_unique<ConnectionReceiver>(port, *g_queue);
-        
-        g_processor->start();
-        g_receiver->start();
+        // 1. 创建线程安全队列（连接接收器和处理器共享）
+        ThreadSafeQueue<clientInfo> connQueue;
 
-        std::cout << "Server is running. Press Ctrl+C to stop." << std::endl;
+        // 2. 创建并启动连接接收器（负责监听和接受新连接）
+        ConnectionReceiver receiver(SERVER_PORT, connQueue);
+        g_receiver = &receiver;
+        receiver.start();
+        std::cout << "ConnectionReceiver started on port " << SERVER_PORT << std::endl;
 
-        // 主线程保持运行
-        while (true) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+        // 3. 创建并启动连接处理器（负责处理客户端读写事件）
+        ConnectionProcessor processor(connQueue, WORKER_THREAD_NUM);
+        g_processor = &processor;
+        processor.start();
+        std::cout << "ConnectionProcessor started with " << WORKER_THREAD_NUM << " worker threads" << std::endl;
+
+        // 4. 主线程等待退出信号
+        std::cout << "Server running, press Ctrl+C to stop..." << std::endl;
+        while (g_running) {
+            sleep(1); // 主线程休眠，等待信号
         }
 
+        // 5. 资源清理
+        std::cout << "Server stopped successfully" << std::endl;
     } catch (const std::exception& e) {
-        std::cerr << "Exception: " << e.what() << std::endl;
-        return -1;
+        std::cerr << "Server startup failed: " << e.what() << std::endl;
+        return EXIT_FAILURE;
     }
 
-    return 0;
+    return EXIT_SUCCESS;
 }

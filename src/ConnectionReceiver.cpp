@@ -131,5 +131,12 @@ void ConnectionReceiver::handleAccept(){
         clientInfo client(clientfd,clientaddr.sin_addr.s_addr,clientaddr.sin_port);
         
         queue_.push(std::move(client));
+        /*
+        char *ip;
+        int clientport;
+        inet_ntop(AF_INET,&clientaddr.sin_addr.s_addr,ip,INET_ADDRSTRLEN);
+        clientport = ntohs(clientaddr.sin_port);
+        fprintf(stdout,"client%s:%d connect\n",ip,clientport);
+        */
     }
 }

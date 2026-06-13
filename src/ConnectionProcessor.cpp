@@ -120,7 +120,8 @@ void ConnectionProcessor::handleNewConnections(int epollfd){
             continue;
         }
 
-        fprintf(stdout,"%s:%d connect to server\n",client.getIP(),client.getPort());
+        fprintf(stdout,"%s:%d connect to server\n",client.getIP().c_str(),client.getPort());
+        fflush(stdout);
         
         int threadid = -1;
         for (size_t i = 0; i < threadNum_; i++)
@@ -135,8 +136,9 @@ void ConnectionProcessor::handleNewConnections(int epollfd){
         if (threadid != -1)
         {
             connections_[threadid][client.fd] = std::make_unique<connection>(client.fd,client.getIP(),client.getPort());
-
         }
+
+        client.fd = -1;
     }
 }
 
@@ -172,7 +174,8 @@ void ConnectionProcessor::handleClientEvent(int epollfd,int fd,uint32_t events){
             if (n > 0)
             {
                 conn->readbuffer.append(buf,n);
-                fprintf(stdout,"%s:%d:\n%s\n",conn->ip,conn->port,conn->readbuffer);
+                fprintf(stdout,"%s:%d:\n%s\n",conn->ip.c_str(),conn->port,conn->readbuffer.c_str());
+                fflush(stdout);
             }else if (n == 0)
             {
                 close(fd);

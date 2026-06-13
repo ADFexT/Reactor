@@ -11,10 +11,29 @@
 
 struct clientInfo{
     int fd = -1;
-    uint32_t ip = NULL;
+    uint32_t ip;
     uint16_t port = 0;
     clientInfo() = default;
     clientInfo(int fd_,uint32_t ip_,uint16_t port_):fd(fd_),ip(ip_),port(port_){};
+
+    clientInfo(const clientInfo&) = delete;
+    clientInfo& operator=(const clientInfo&) = delete;
+
+    clientInfo(clientInfo&& other) noexcept
+        : fd(other.fd), ip(other.ip), port(other.port) {
+        other.fd = -1;
+    }
+
+    clientInfo& operator=(clientInfo&& other) noexcept {
+        if (this != &other) {
+            if (fd >= 0) close(fd);
+            fd = other.fd;
+            ip = other.ip;
+            port = other.port;
+            other.fd = -1;
+        }
+        return *this;
+    }
 
     ~clientInfo(){
         if (fd >= 0){
@@ -55,7 +74,7 @@ public:
     ThreadSafeQueue(const ThreadSafeQueue&) = delete;
     ThreadSafeQueue& operator = (const ThreadSafeQueue&) = delete;
 
-    void push(const T item) {
+    void push(T item) {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             queue_.push(std::move(item));
