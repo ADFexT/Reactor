@@ -13,6 +13,8 @@ private:
     void workerloop(int id);
     void handleNewConnections(int epollfd);
     void handleClientEvent(int epollfd,int fd,uint32_t events);
+    int findThreadId(int epollfd);
+    void closeConnection(int epollfd,int threadid,int fd);
 
     struct connection
     {

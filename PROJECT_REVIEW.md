@@ -1,8 +1,9 @@
 # Reactor 项目审查说明文档
 
 **审查日期：** 2026-06-13  
+**最后更新：** 2026-06-13（epoll 连接清理修复）  
 **审查范围：** 代码结构、功能完整性、健壮性、工程化、已知问题与后续优化  
-**说明：** 本文档仅做分析与记录，不涉及代码修改。
+**说明：** 本文档记录审查结论与已完成的修复变更。
 
 ---
 
@@ -42,30 +43,56 @@
 
 ## 2. 严重问题（建议优先处理）
 
-### 2.1 Echo 回显逻辑存在缺陷
+### 2.1 Echo 回显逻辑存在缺陷 — ✅ 已修复
 
 **位置：** `src/ConnectionProcessor.cpp` → `handleClientEvent()` → `EPOLLIN` 分支
 
-**现象：** 客户端连接成功后发送数据，服务端能读取并打印，但**首次读取的数据不会被回显**给客户端。测试客户端会出现大量 `recv error` 或超时无回显。
+**原现象：** 客户端连接成功后发送数据，服务端能读取并打印，但**首次读取的数据不会被回显**给客户端。
 
-**原因：** 读取数据后，回显逻辑被 `if (!conn->writebuffer.empty())` 条件 gate 住。新连接的 `writebuffer` 初始为空，导致 `readbuffer` 中的数据永远不会被移入 `writebuffer` 并写出。
+**原原因：** 读取数据后，回显逻辑被 `if (!conn->writebuffer.empty())` 条件 gate 住。
 
-```cpp
-// 当前逻辑（简化）
-conn->readbuffer.append(buf, n);   // 数据进入 readbuffer
-if (!conn->writebuffer.empty()) {  // 首次必然为 false，跳过回显
-    conn->writebuffer += conn->readbuffer;
-    // ... write ...
-}
-```
-
-**影响：** 核心业务功能（Echo）不能正常工作，压测客户端无法验证服务端正确性。
-
-**建议修复方向：** 读取完成后，应将 `readbuffer` 内容转入 `writebuffer`（或直接在读取后触发写逻辑），而非依赖 `writebuffer` 已非空。
+**修复：** 改为 `if (!conn->readbuffer.empty())`，读取后立即将数据转入 `writebuffer` 并写出。
 
 ---
 
-### 2.2 缺少构建系统与运行文档
+### 2.2 epoll 连接关闭后未正确清理 — ✅ 已修复
+
+**位置：** `src/ConnectionProcessor.cpp`
+
+**原现象：** 高并发下部分连接客户端已关闭，但服务端 epoll 中仍残留对应 fd，持续触发无效事件。
+
+**根因：**
+
+| 问题点 | 说明 |
+|--------|------|
+| 孤儿 fd | `epoll_ctl(ADD)` 成功但未写入 `connections_`，或 `connections_` 中找不到 fd 时直接 `return`，未 `close` 也未 `epoll_ctl(DEL)` |
+| 无统一清理 | 各处 `close(fd)` + `erase` 分散实现，从未显式 `epoll_ctl(EPOLL_CTL_DEL)` |
+| EPOLLOUT 误判 | 仅收到 `EPOLLOUT` 且 `writebuffer` 为空时只 `MOD` 回 `EPOLLIN`，未探测对端是否已断开 |
+| Worker 退出不完整 | 仅关闭 `connections_` 中的 fd，孤儿 fd 泄漏 |
+
+**修复：**
+
+1. 新增 `findThreadId()` / `closeConnection()` 统一封装 `epoll_ctl(DEL)` + `close()` + `erase()`
+2. `handleClientEvent` 对孤儿 fd 和 `threadid == -1` 主动清理，不再静默 `return`
+3. `handleNewConnections` 在 `threadid == -1` 时回滚已注册的 epoll fd
+4. `EPOLLOUT` 分支在 `writebuffer` 为空时用 `recv(MSG_PEEK)` 探测连接是否已死
+5. Worker 退出时通过 `closeConnection()` 完整清理所有连接
+
+---
+
+### 2.3 `read()` 返回值类型错误导致崩溃 — ✅ 已修复
+
+**位置：** `src/ConnectionProcessor.cpp` → `EPOLLIN` 分支
+
+**原现象：** 使用 `nc` 发送一条消息后服务端 core dump：`std::length_error: basic_string::append`
+
+**原原因：** `size_t n = read(...)` 在 `read` 返回 `-1`（`EAGAIN`）时被转为巨大正数，导致 `append(buf, n)` 越界。
+
+**修复：** 改为 `ssize_t n = read(...)` / `ssize_t n = write(...)`。
+
+---
+
+### 2.4 缺少构建系统与运行文档
 
 **现状：**
 
@@ -83,7 +110,7 @@ if (!conn->writebuffer.empty()) {  // 首次必然为 false，跳过回显
 
 ---
 
-### 2.3 平台依赖未声明
+### 2.5 平台依赖未声明
 
 **现状：** 代码大量使用 Linux 专有 API：
 
@@ -290,13 +317,14 @@ if (epollfd == -1) {
 
 | 规划项 | 优先级 | 当前状态 |
 |--------|--------|----------|
-| 补充 errno 错误日志 | P1 | ❌ 未做 |
-| epollfd → 线程ID 哈希缓存 | P1 | ❌ 未做 |
+| 补充 errno 错误日志 | P1 | ✅ 已做 |
+| epollfd → 线程ID 哈希缓存 | P1 | ⚠️ 部分（已提取 `findThreadId()`，仍为遍历） |
 | Worker 独立 stopfd | P2 | ❌ 未做 |
 | TCP Keepalive / 超时清理 | P2 | ❌ 未做 |
 | 封装 Server 顶层类 | P3 | ❌ 未做 |
 | 按负载分发连接 | P3 | ❌ 未做 |
-| Echo 功能正确性 | — | ❌ 存在逻辑缺陷（本文档 2.1） |
+| Echo 功能正确性 | — | ✅ 已修复 |
+| epoll 连接清理 | — | ✅ 已修复 |
 | 构建系统 / README | — | ❌ 未做 |
 
 ---
@@ -332,25 +360,81 @@ if (epollfd == -1) {
 |------|-----------|--------|------|
 | `include/ThreadSafeQueue.h` | 108 | ★★★☆☆ | 移动语义已修复；缺显式实例化文档 |
 | `include/ConnectionReceiver.h` | 27 | ★★★☆☆ | 接口简洁 |
-| `include/ConnectionProcessor.h` | 42 | ★★★☆☆ | 结构合理 |
-| `src/ConnectionReceiver.cpp` | 142 | ★★★☆☆ | 主 Reactor 基本完整 |
-| `src/ConnectionProcessor.cpp` | 263 | ★★☆☆☆ | Echo 逻辑有缺陷；错误处理不足 |
-| `src/main.cpp` | 66 | ★★☆☆☆ | 全局变量；信号处理不安全 |
+| `include/ConnectionProcessor.h` | 44 | ★★★☆☆ | 新增连接清理辅助方法 |
+| `src/ConnectionReceiver.cpp` | ~150 | ★★★☆☆ | errno 日志已补充 |
+| `src/ConnectionProcessor.cpp` | ~290 | ★★★☆☆ | Echo、epoll 清理、ssize_t 已修复 |
+| `src/main.cpp` | 58 | ★★★☆☆ | 信号处理已改为仅设标志位 |
 | `src/ThreadSafeQueue.cpp` | 6 | ★☆☆☆☆ | 冗余空文件 |
 | `test_client/client.cpp` | 88 | ★★☆☆☆ | 可用但粗糙 |
 | `项目说明` | 23 | — | 开发日志，非用户文档 |
 | `BUGFIX_REPORT.md` | 99 | — | 问题记录完善，验证未完成 |
 
-**综合评分（学习项目维度）：** 架构设计 ★★★★☆ | 功能完整性 ★★☆☆☆ | 工程化 ★☆☆☆☆ | 健壮性 ★★☆☆☆
+**综合评分（学习项目维度）：** 架构设计 ★★★★☆ | 功能完整性 ★★★☆☆ | 工程化 ★☆☆☆☆ | 健壮性 ★★★☆☆
 
 ---
 
 ## 11. 总结
 
-本项目作为 **Reactor 模式学习实践**，架构思路正确、模块划分清晰，主从 Reactor + 线程安全队列的核心链路已经打通，fd 生命周期问题也已修复。但从"可交付的软件"角度看，仍存在一个**阻塞核心功能的 Echo 逻辑缺陷**，以及**工程化基础设施几乎为零**的问题。
+本项目作为 **Reactor 模式学习实践**，架构思路正确、模块划分清晰。截至 2026-06-13，已完成以下关键修复：
 
-建议按照第九章的优先级逐步完善：先让 Echo 功能在 Linux 环境下跑通并通过压测，再补齐构建文档与错误日志，最后再做架构层面的优雅化改造。
+- Echo 回显逻辑
+- `ssize_t` 类型导致的 `length_error` 崩溃
+- epoll 连接关闭后的孤儿 fd 清理
+- errno 错误日志与信号处理安全性
+
+仍待完善的主要方向：构建系统/README、Worker 独立 stopfd、惊群优化、TCP Keepalive 等（见第九章）。
 
 ---
 
-*本文档由代码审查自动生成，仅作分析参考，不包含任何代码变更。*
+## 12. 修复变更记录
+
+### 2026-06-13 — epoll 连接清理修复
+
+**问题：** 高并发下部分已关闭连接仍残留在 epoll 中，持续触发无效事件。
+
+**变更文件：**
+
+| 文件 | 改动 |
+|------|------|
+| `include/ConnectionProcessor.h` | 新增 `findThreadId()`、`closeConnection()` |
+| `src/ConnectionProcessor.cpp` | 统一连接关闭逻辑；孤儿 fd 清理；EPOLLOUT 探活；Worker 退出完整清理 |
+
+**`closeConnection()` 行为：**
+
+```
+epoll_ctl(EPOLL_CTL_DEL) → close(fd) → connections_[threadid].erase(fd)
+```
+
+**关键路径改动：**
+
+1. **`handleClientEvent`**：`connections_` 中找不到 fd 时，执行 `epoll_ctl(DEL)` + `close()`，不再静默 return
+2. **`handleNewConnections`**：`threadid == -1` 时回滚已 ADD 的 fd
+3. **`EPOLLOUT` 分支**：`writebuffer` 为空时用 `recv(MSG_PEEK | MSG_DONTWAIT)` 检测对端是否已断开
+4. **`workerloop` 退出**：通过 `closeConnection()` 逐个清理，保证 epoll 与连接表同步清空
+
+**验证建议：**
+
+```bash
+# 编译
+g++ -std=c++17 -pthread -o server src/main.cpp src/ConnectionReceiver.cpp src/ConnectionProcessor.cpp
+
+# 启动服务端后，用 nc 反复连接/断开，或运行压测客户端
+nc 127.0.0.1 8888
+
+# 另开终端观察 fd 数量是否持续增长（应稳定）
+ls /proc/$(pgrep server)/fd | wc -l
+```
+
+---
+
+### 2026-06-13 — Echo 回显与 ssize_t 崩溃修复
+
+| 文件 | 改动 |
+|------|------|
+| `src/ConnectionProcessor.cpp` | `readbuffer.empty()` 触发回显；`ssize_t` 接收 read/write 返回值 |
+| `src/ConnectionReceiver.cpp` | 系统调用失败补充 `strerror(errno)` |
+| `src/main.cpp` | 信号处理仅设 `g_running`，主线程负责 `stop()` |
+
+---
+
+*本文档随项目修复持续更新。*

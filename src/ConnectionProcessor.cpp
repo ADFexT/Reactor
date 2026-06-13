@@ -1,5 +1,6 @@
 #include "../include/ConnectionProcessor.h"
 #include <sys/epoll.h>
+#include <sys/socket.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <cstring>
@@ -46,6 +47,20 @@ void ConnectionProcessor::stop(){
     {
         if (fd != -1) close(fd);
     }
+}
+
+int ConnectionProcessor::findThreadId(int epollfd){
+    for (size_t i = 0; i < threadNum_; i++)
+    {
+        if (workerepollfds[i] == epollfd) return i;
+    }
+    return -1;
+}
+
+void ConnectionProcessor::closeConnection(int epollfd,int threadid,int fd){
+    epoll_ctl(epollfd,EPOLL_CTL_DEL,fd,nullptr);
+    close(fd);
+    if (threadid != -1) connections_[threadid].erase(fd);
 }
 
 void ConnectionProcessor::workerloop(int id){
@@ -95,10 +110,11 @@ void ConnectionProcessor::workerloop(int id){
         }
     }
     
-    for (auto& pair : connections_[id]) {
-        close(pair.first);
-    } 
-    connections_[id].clear();
+    while (!connections_[id].empty())
+    {
+        int fd = connections_[id].begin()->first;
+        closeConnection(epollfd,id,fd);
+    }
 }
 
 void ConnectionProcessor::handleNewConnections(int epollfd){
@@ -125,45 +141,44 @@ void ConnectionProcessor::handleNewConnections(int epollfd){
         fprintf(stdout,"%s:%d connect to server\n",client.getIP().c_str(),client.getPort());
         fflush(stdout);
         
-        int threadid = -1;
-        for (size_t i = 0; i < threadNum_; i++)
+        int threadid = findThreadId(epollfd);
+        if (threadid == -1)
         {
-            if (workerepollfds[i] == epollfd)
-            {
-                threadid = i;
-                break;
-            }
+            fprintf(stderr,"handleNewConnections threadid not found, cleanup fd %d\n",client.fd);
+            epoll_ctl(epollfd,EPOLL_CTL_DEL,client.fd,nullptr);
+            close(client.fd);
+            client.fd = -1;
+            continue;
         }
 
-        if (threadid != -1)
-        {
-            connections_[threadid][client.fd] = std::make_unique<connection>(client.fd,client.getIP(),client.getPort());
-        }
-
+        connections_[threadid][client.fd] = std::make_unique<connection>(client.fd,client.getIP(),client.getPort());
         client.fd = -1;
     }
 }
 
 void ConnectionProcessor::handleClientEvent(int epollfd,int fd,uint32_t events){
-    int threadid = -1;
-    for (size_t i = 0; i < threadNum_; i++)
+    int threadid = findThreadId(epollfd);
+    if (threadid == -1)
     {
-        if (workerepollfds[i] == epollfd)
-        {
-            threadid = i;
-            break;
-        }
+        fprintf(stderr,"handleClientEvent threadid not found, cleanup orphan fd %d\n",fd);
+        epoll_ctl(epollfd,EPOLL_CTL_DEL,fd,nullptr);
+        close(fd);
+        return;
     }
-    if (threadid == -1) return;
     
     auto it = connections_[threadid].find(fd);
-    if (it == connections_[threadid].end()) return;
+    if (it == connections_[threadid].end())
+    {
+        fprintf(stderr,"handleClientEvent orphan fd %d on worker %d, cleanup\n",fd,threadid);
+        epoll_ctl(epollfd,EPOLL_CTL_DEL,fd,nullptr);
+        close(fd);
+        return;
+    }
     
     auto& conn = it->second;
 
     if ((events & EPOLLERR) || (events & EPOLLHUP) || (events & EPOLLRDHUP)) {
-        close(fd);
-        connections_[threadid].erase(it);
+        closeConnection(epollfd,threadid,fd);
         return;
     }
 
@@ -172,7 +187,7 @@ void ConnectionProcessor::handleClientEvent(int epollfd,int fd,uint32_t events){
         char buf[4096];
         while (true)
         {
-            size_t n = read(fd,buf,sizeof(buf));
+            ssize_t n = read(fd,buf,sizeof(buf));
             if (n > 0)
             {
                 conn->readbuffer.append(buf,n);
@@ -180,15 +195,13 @@ void ConnectionProcessor::handleClientEvent(int epollfd,int fd,uint32_t events){
                 fflush(stdout);
             }else if (n == 0)
             {
-                close(fd);
-                connections_[threadid].erase(it);
+                closeConnection(epollfd,threadid,fd);
                 return;
             }else{
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
                     break; // 读完
                 } else {
-                    close(fd);
-                    connections_[threadid].erase(it);
+                    closeConnection(epollfd,threadid,fd);
                     return;
                 }
             }
@@ -200,7 +213,7 @@ void ConnectionProcessor::handleClientEvent(int epollfd,int fd,uint32_t events){
                 
                 while (!conn->writebuffer.empty())
                 {   
-                    size_t n = write(fd,conn->writebuffer.data(),conn->writebuffer.length());
+                    ssize_t n = write(fd,conn->writebuffer.data(),conn->writebuffer.length());
                     if (n > 0) {
                         conn->writebuffer.erase(0, n);
                     } else{
@@ -212,8 +225,7 @@ void ConnectionProcessor::handleClientEvent(int epollfd,int fd,uint32_t events){
                             epoll_ctl(epollfd, EPOLL_CTL_MOD, fd, &ev);
                             return;
                         }else{
-                            close(fd);
-                            connections_[threadid].erase(it);
+                            closeConnection(epollfd,threadid,fd);
                             return;
                         }
                     }
@@ -242,8 +254,7 @@ void ConnectionProcessor::handleClientEvent(int epollfd,int fd,uint32_t events){
                     {
                         break;
                     }else{
-                        close(fd);
-                        connections_[threadid].erase(it);
+                        closeConnection(epollfd,threadid,fd);
                         return;
                     }
                     
@@ -255,6 +266,14 @@ void ConnectionProcessor::handleClientEvent(int epollfd,int fd,uint32_t events){
 
         if (conn->writebuffer.empty())
         {
+            char peek;
+            ssize_t n = recv(fd,&peek,1,MSG_PEEK | MSG_DONTWAIT);
+            if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK))
+            {
+                closeConnection(epollfd,threadid,fd);
+                return;
+            }
+
             conn->writePending = false;
             epoll_event ev{};
             ev.data.fd = fd;
