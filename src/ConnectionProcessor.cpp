@@ -3,6 +3,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <cstring>
+#include <cerrno>
 #include <iostream>
 #include <unordered_map>
 #include <arpa/inet.h>
@@ -50,8 +51,8 @@ void ConnectionProcessor::stop(){
 void ConnectionProcessor::workerloop(int id){
     int epollfd = epoll_create1(EPOLL_CLOEXEC);
     if (epollfd == -1)
-    {   close(epollfd);
-        fprintf(stderr,"Failed to create epoll %d",id);
+    {
+        fprintf(stderr,"Failed to create epoll %d: %s\n",id,strerror(errno));
         return;
     }
 
@@ -64,7 +65,7 @@ void ConnectionProcessor::workerloop(int id){
     if (epoll_ctl(epollfd,EPOLL_CTL_ADD,queue_.getEventFd(),&ev) == -1)
     {
         close(epollfd);
-        fprintf(stderr,"workerloop%d failed to add queue event",id);
+        fprintf(stderr,"workerloop%d failed to add queue event: %s\n",id,strerror(errno));
         return;
     }
     
@@ -77,6 +78,7 @@ void ConnectionProcessor::workerloop(int id){
         if (n < 0)
         {
             if (errno == EINTR) continue;
+            fprintf(stderr,"workerloop%d epoll_wait failed: %s\n",id,strerror(errno));
             break;  
         }
 
@@ -106,7 +108,7 @@ void ConnectionProcessor::handleNewConnections(int epollfd){
     clientInfo client;
     while (queue_.trypop(client))
     {
-        if (client.fd == -1) return;
+        if (client.fd == -1) continue;
         
         epoll_event ev{};
         ev.data.fd = client.fd;
@@ -114,7 +116,7 @@ void ConnectionProcessor::handleNewConnections(int epollfd){
 
         if (epoll_ctl(epollfd,EPOLL_CTL_ADD,client.fd,&ev) == -1)
         {
-            fprintf(stderr,"handleNewConnections failed to add new fd to epoll"); 
+            fprintf(stderr,"handleNewConnections failed to add new fd to epoll: %s\n",strerror(errno)); 
             close(client.fd);
             client.fd = -1;
             continue;
@@ -191,7 +193,7 @@ void ConnectionProcessor::handleClientEvent(int epollfd,int fd,uint32_t events){
                 }
             }
             
-            if (!conn->writebuffer.empty())
+            if (!conn->readbuffer.empty())
             {
                 conn->writebuffer  += conn->readbuffer;
                 conn->readbuffer.clear();

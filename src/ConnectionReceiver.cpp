@@ -6,6 +6,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <cstring>
+#include <cerrno>
+#include <string>
 #include <stdexcept>
 #include <iostream>
 
@@ -14,7 +16,7 @@ ConnectionReceiver::ConnectionReceiver(int port,ThreadSafeQueue<clientInfo>& que
         stopfd_ = eventfd(0,O_NONBLOCK | O_CLOEXEC);
         if (stopfd_ == -1)
         {
-            throw std::runtime_error("Failed to create stopfd");
+            throw std::runtime_error(std::string("Failed to create stopfd: ") + strerror(errno));
         }
     }
 
@@ -29,7 +31,7 @@ void ConnectionReceiver::start(){
     listenfd_ = socket(AF_INET,SOCK_STREAM | SOCK_NONBLOCK |SOCK_CLOEXEC,0);
     if (listenfd_ == -1)
     {
-        throw std::runtime_error("Failed to create listenfd_");
+        throw std::runtime_error(std::string("Failed to create listenfd_: ") + strerror(errno));
     }
 
     int opt = 1;
@@ -43,19 +45,19 @@ void ConnectionReceiver::start(){
     if (bind(listenfd_,(sockaddr *)&addr,sizeof(addr)) < 0)
     {
         close(listenfd_);
-        throw std::runtime_error("Failed to bind");
+        throw std::runtime_error(std::string("Failed to bind: ") + strerror(errno));
     }
 
     if (listen(listenfd_,SOMAXCONN) < 0)
     {
         close(listenfd_);
-        throw std::runtime_error("Failed to listen");
+        throw std::runtime_error(std::string("Failed to listen: ") + strerror(errno));
     }
 
     epollfd_ = epoll_create1(EPOLL_CLOEXEC);
     if (epollfd_ == -1)
     {
-        throw std::runtime_error("Failed to create epoll");
+        throw std::runtime_error(std::string("Failed to create epoll: ") + strerror(errno));
     }
 
     epoll_event ev{};
@@ -63,14 +65,14 @@ void ConnectionReceiver::start(){
     ev.data.fd = listenfd_;
     if (epoll_ctl(epollfd_,EPOLL_CTL_ADD,listenfd_,&ev) == -1)
     {
-        throw std::runtime_error("Failed to add listenfd_ to epollfd_");
+        throw std::runtime_error(std::string("Failed to add listenfd_ to epollfd_: ") + strerror(errno));
     }
 
     ev.events = EPOLLIN;
     ev.data.fd = stopfd_;
     if (epoll_ctl(epollfd_,EPOLL_CTL_ADD,stopfd_,&ev) == -1)
     {
-        throw std::runtime_error("Failed to add stopfd_ to epollfd_");
+        throw std::runtime_error(std::string("Failed to add stopfd_ to epollfd_: ") + strerror(errno));
     }
     
     running_ = true;
@@ -100,6 +102,7 @@ void ConnectionReceiver::run(){
         if (n < 0)
         {
             if (errno == EINTR) continue;
+            fprintf(stderr,"ConnectionReceiver epoll_wait failed: %s\n",strerror(errno));
             break;
         }
 
@@ -126,7 +129,12 @@ void ConnectionReceiver::handleAccept(){
         sockaddr_in clientaddr{};
         socklen_t len = sizeof(clientaddr);
         int clientfd = accept4(listenfd_,(sockaddr*)&clientaddr,&len,SOCK_NONBLOCK | SOCK_CLOEXEC);
-        if (clientfd == -1) break;
+        if (clientfd == -1)
+        {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            fprintf(stderr,"accept4 failed: %s\n",strerror(errno));
+            break;
+        }
 
         clientInfo client(clientfd,clientaddr.sin_addr.s_addr,clientaddr.sin_port);
         

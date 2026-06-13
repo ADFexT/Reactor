@@ -8,20 +8,11 @@
 
 // 全局变量（用于信号处理）
 std::atomic<bool> g_running(true);
-ConnectionReceiver* g_receiver = nullptr;
-ConnectionProcessor* g_processor = nullptr;
 
 // 信号处理函数（处理Ctrl+C退出）
 void handleSignal(int sig) {
     if (sig == SIGINT) {
-        std::cout << "\nReceived SIGINT, stopping server..." << std::endl;
         g_running = false;
-        if (g_receiver) {
-            g_receiver->stop();
-        }
-        if (g_processor) {
-            g_processor->stop();
-        }
     }
 }
 
@@ -39,13 +30,11 @@ int main(int argc, char* argv[]) {
 
         // 2. 创建并启动连接接收器（负责监听和接受新连接）
         ConnectionReceiver receiver(SERVER_PORT, connQueue);
-        g_receiver = &receiver;
         receiver.start();
         std::cout << "ConnectionReceiver started on port " << SERVER_PORT << std::endl;
 
         // 3. 创建并启动连接处理器（负责处理客户端读写事件）
         ConnectionProcessor processor(connQueue, WORKER_THREAD_NUM);
-        g_processor = &processor;
         processor.start();
         std::cout << "ConnectionProcessor started with " << WORKER_THREAD_NUM << " worker threads" << std::endl;
 
@@ -56,6 +45,9 @@ int main(int argc, char* argv[]) {
         }
 
         // 5. 资源清理
+        std::cout << "\nReceived SIGINT, stopping server..." << std::endl;
+        receiver.stop();
+        processor.stop();
         std::cout << "Server stopped successfully" << std::endl;
     } catch (const std::exception& e) {
         std::cerr << "Server startup failed: " << e.what() << std::endl;
